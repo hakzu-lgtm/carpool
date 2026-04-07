@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { loadData, saveData } from "./api/sheets";
 
 const POLL_INTERVAL_MS = 5000; // 5초 폴링
@@ -34,6 +34,10 @@ function getTodayDayNum() {
   return d >= 1 && d <= 5 ? d : null;
 }
 
+function toLocalDateStr(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 function getWeekDates(offset = 0) {
   const today = new Date();
   const dow = today.getDay();
@@ -47,7 +51,7 @@ function getWeekDates(offset = 0) {
     result[i + 1] = {
       month: d.getMonth() + 1,
       date: d.getDate(),
-      dateStr: d.toISOString().split("T")[0],
+      dateStr: toLocalDateStr(d),
     };
   }
   return result;
@@ -60,6 +64,22 @@ function getWeekKey(offset = 0) {
 function isBannedOnDay(carDigit, day) {
   if (carDigit === "" || carDigit == null) return false;
   return (BANNED_DIGITS[day] || []).includes(parseInt(carDigit, 10));
+}
+
+// 홀짝제: 홀수 차(끝번호 1,3,5,7,9)는 홀수 날짜에만, 짝수 차(0,2,4,6,8)는 짝수 날짜에만 운행
+function isOddEvenBanned(carDigit, dateStr) {
+  if (carDigit === "" || carDigit == null || !dateStr) return false;
+  const digit = parseInt(carDigit, 10);
+  const dayOfMonth = parseInt(String(dateStr).split("-")[2], 10);
+  const carIsOdd = digit % 2 !== 0;
+  const dateIsOdd = dayOfMonth % 2 !== 0;
+  return carIsOdd !== dateIsOdd; // 홀수차→짝수날 금지, 짝수차→홀수날 금지
+}
+
+// 현재 규제 방식에 따라 금지 여부 반환
+function isRestricted(carDigit, day, dateStr, mode) {
+  if (mode === "홀짝제") return isOddEvenBanned(carDigit, dateStr);
+  return isBannedOnDay(carDigit, day);
 }
 
 function loadLS(key, fallback) {
@@ -114,9 +134,9 @@ function Toast({ msg, type, onClose }) {
 // ── 이용 안내 모달 ────────────────────────────────────────────────────
 function HelpModal({ onClose }) {
   const steps = [
-    { icon: "👤", title: "내 정보 등록", desc: "설정 탭에서 이름과 차량 끝번호를 먼저 저장해주세요." },
-    { icon: "🚙", title: "타시오 등록", desc: "운행할 요일과 출발 시간을 선택해 카풀 제공자로 등록하세요. 차량 5부제 금지 요일은 자동 차단됩니다." },
-    { icon: "🙋", title: "탑승 예약", desc: "현황판에서 원하는 운전자 카드를 클릭하면 예약됩니다. 최대 2인, 하루 1회만 예약 가능합니다." },
+    { icon: "👤", title: "내 정보 등록 (필수 먼저!)", desc: "하단 ⚙️ 내 설정 → 이름 입력 + 차량 번호판 끝자리 선택 → 저장하기" },
+    { icon: "🚙", title: "타시오 등록 (운전자)", desc: "⚙️ 내 설정 → 타시오 등록 → 요일·시간 선택 → 등록. 규제 금지 요일은 자동 차단됩니다." },
+    { icon: "🙋", title: "태워줘 (탑승자)", desc: "🙋 태워줘 탭 → 원하는 운전자 카드 클릭 → 예약 완료. 하루 1회, 최대 2명까지 탑승 가능합니다." },
   ];
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4" onClick={onClose}>
@@ -138,6 +158,22 @@ function HelpModal({ onClose }) {
               </div>
             </div>
           ))}
+
+          {/* 차량 규제 안내 */}
+          <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3 space-y-2">
+            <p className="text-slate-600 text-xs font-black">🚘 차량 규제 방식 (⚙️ 내 설정에서 변경)</p>
+            <div className="flex gap-2">
+              <div className="flex-1 bg-white border border-violet-200 rounded-xl p-2 text-center">
+                <p className="text-violet-600 text-xs font-black mb-0.5">5부제</p>
+                <p className="text-slate-400 text-xs leading-relaxed">요일별 끝번호<br />2자리 진입 금지</p>
+              </div>
+              <div className="flex-1 bg-white border border-emerald-200 rounded-xl p-2 text-center">
+                <p className="text-emerald-600 text-xs font-black mb-0.5">홀짝제</p>
+                <p className="text-slate-400 text-xs leading-relaxed">홀수차→홀수 날<br />짝수차→짝수 날</p>
+              </div>
+            </div>
+          </div>
+
           <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3">
             <p className="text-amber-600 text-xs font-semibold">💡 Google Sheets 연동 시 실시간으로 다른 사용자와 공유됩니다.</p>
           </div>
@@ -155,32 +191,33 @@ function DriverCard({ driver, isMine, isBooked, isFull, onBook, onDelete }) {
   return (
     <div
       onClick={!isMine ? onBook : undefined}
-      className={`rounded-xl border px-2.5 py-2 transition-all duration-200 select-none
+      className={`rounded-2xl border px-3 py-3 transition-all duration-200 select-none
         ${isMine
           ? "border-violet-200 bg-violet-50"
           : isFull && !isBooked
           ? "border-slate-100 bg-slate-50 opacity-50"
-          : "border-emerald-200 bg-emerald-50 cursor-pointer hover:bg-emerald-100 active:scale-95"}`}
+          : "border-emerald-200 bg-emerald-50 active:scale-95 active:bg-emerald-100"}`}
     >
-      <div className="flex items-center justify-between mb-0.5">
-        <span className="text-slate-800 font-black text-xs">{driver.time}</span>
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-slate-800 font-black text-sm">{driver.time}</span>
         {isMine ? (
           <button onClick={(e) => { e.stopPropagation(); onDelete(); }}
-            className="text-slate-300 hover:text-red-400 transition-colors text-xs px-1 py-0.5 rounded hover:bg-red-50">삭제</button>
+            className="text-slate-300 hover:text-red-400 transition-colors text-xs px-2 py-1 rounded-lg hover:bg-red-50 min-w-[40px] text-center">삭제</button>
         ) : isFull ? (
           <span className="text-red-400 text-xs font-bold">마감</span>
         ) : (
-          <span className={`text-xs font-bold px-1.5 py-0.5 rounded-full ${isBooked ? "bg-emerald-100 text-emerald-600" : "bg-slate-100 text-slate-400"}`}>
-            {isBooked ? "✓" : "탑승"}
+          <span className={`text-xs font-bold px-2 py-1 rounded-full ${isBooked ? "bg-emerald-100 text-emerald-600" : "bg-slate-100 text-slate-400"}`}>
+            {isBooked ? "✓예약됨" : "탑승"}
           </span>
         )}
       </div>
       <div className="flex items-center justify-between gap-1">
-        <span className={`text-xs font-semibold truncate min-w-0 ${isMine ? "text-violet-600" : "text-slate-700"}`}>
-          {driver.name}{isMine && <span className="ml-1 text-violet-400 font-normal">(나)</span>}
+        <span className={`text-sm font-bold truncate min-w-0 ${isMine ? "text-violet-600" : "text-slate-700"}`}>
+          {driver.name}{isMine && <span className="ml-1 text-violet-400 font-normal text-xs">(나)</span>}
         </span>
         <div className="flex gap-0.5 flex-shrink-0">
-          {driver.passengers.map((p, i) => <span key={i} className="text-xs leading-none" title={p}>👤</span>)}
+          {driver.passengers.map((p, i) => <span key={i} className="text-sm leading-none" title={p}>👤</span>)}
+          {[...Array(2 - driver.passengers.length)].map((_, i) => <span key={i} className="text-sm leading-none opacity-20">👤</span>)}
         </div>
       </div>
     </div>
@@ -188,10 +225,10 @@ function DriverCard({ driver, isMine, isBooked, isFull, onBook, onDelete }) {
 }
 
 // ── 요일 컬럼 ─────────────────────────────────────────────────────────
-function DayColumn({ day, dateInfo, isToday, drivers, bannedPeople, userName, onBookRide, onDeleteDriver, weather }) {
+function DayColumn({ day, dateInfo, isToday, drivers, bannedPeople, userName, onBookRide, onDeleteDriver, weather, scrollRef, restrictionMode }) {
   const c = DAY_COLORS[day];
   return (
-    <div className={`flex-1 min-w-[148px] flex flex-col rounded-2xl overflow-hidden transition-all duration-300
+    <div ref={scrollRef} className={`flex-1 min-w-[148px] flex flex-col rounded-2xl overflow-hidden transition-all duration-300
       ${isToday
         ? `shadow-lg ring-2 ${c.ring} bg-white`
         : `shadow-md border ${c.border} bg-white`}`}>
@@ -225,7 +262,9 @@ function DayColumn({ day, dateInfo, isToday, drivers, bannedPeople, userName, on
         )}
 
         <div className={`text-xs mt-1.5 ${isToday ? "text-white/60" : "text-slate-400"}`}>
-          금지 {BANNED_DIGITS[day].join(", ")}번
+          {restrictionMode === "홀짝제"
+            ? (parseInt(dateInfo.date) % 2 !== 0 ? "짝수 차량 금지" : "홀수 차량 금지")
+            : `금지 ${BANNED_DIGITS[day].join(", ")}번`}
         </div>
       </div>
 
@@ -262,9 +301,20 @@ function DayColumn({ day, dateInfo, isToday, drivers, bannedPeople, userName, on
 }
 
 // ── 태워줘 패널 ───────────────────────────────────────────────────────
-function BoardPanel({ schedules, userName, userCar, loading, onBookRide, onDeleteDriver, onRefresh, weekOffset, setWeekOffset, weekDates, weatherData }) {
+function BoardPanel({ schedules, userName, userCar, loading, onBookRide, onDeleteDriver, onRefresh, weekOffset, setWeekOffset, weekDates, weatherData, restrictionMode }) {
   const todayDay = getTodayDayNum();
   const currentWeekKey = useMemo(() => getWeekKey(0), []);
+  const todayColRef = useRef(null);
+  const scrollContainerRef = useRef(null);
+
+  useEffect(() => {
+    if (weekOffset === 0 && todayColRef.current && scrollContainerRef.current) {
+      const col = todayColRef.current;
+      const container = scrollContainerRef.current;
+      const offset = col.offsetLeft - container.offsetWidth / 2 + col.offsetWidth / 2;
+      container.scrollTo({ left: offset, behavior: "smooth" });
+    }
+  }, [weekOffset]);
   const weekKey = weekDates[1].dateStr;
   const displaySchedules = schedules.filter((s) => (s.weekKey ?? currentWeekKey) === weekKey);
 
@@ -317,7 +367,7 @@ function BoardPanel({ schedules, userName, userCar, loading, onBookRide, onDelet
       </div>
 
       {/* 가로 스크롤 요일 컬럼 */}
-      <div className="flex gap-2.5 overflow-x-auto pb-2 scrollbar-hide">
+      <div ref={scrollContainerRef} className="flex gap-2.5 overflow-x-auto pb-2 scrollbar-hide">
         {loading && displaySchedules.length === 0
           ? [1, 2, 3, 4, 5].map((i) => (
               <div key={i} className="flex-1 min-w-[148px] h-48 rounded-2xl bg-violet-100/60 animate-pulse" />
@@ -329,7 +379,7 @@ function BoardPanel({ schedules, userName, userCar, loading, onBookRide, onDelet
               if (userName && userCar !== "") knownPeople.set(userName, userCar);
               schedules.forEach((s) => { if (!knownPeople.has(s.name)) knownPeople.set(s.name, s.carLastDigit); });
               const bannedPeople = [];
-              knownPeople.forEach((car, name) => { if (isBannedOnDay(car, day)) bannedPeople.push(name); });
+              knownPeople.forEach((car, name) => { if (isRestricted(car, day, dateInfo.dateStr, restrictionMode)) bannedPeople.push(name); });
               return (
                 <DayColumn
                   key={day}
@@ -342,6 +392,8 @@ function BoardPanel({ schedules, userName, userCar, loading, onBookRide, onDelet
                   onBookRide={onBookRide}
                   onDeleteDriver={onDeleteDriver}
                   weather={weatherData[dateInfo.dateStr]}
+                  scrollRef={weekOffset === 0 && todayDay === day ? todayColRef : null}
+                  restrictionMode={restrictionMode}
                 />
               );
             })}
@@ -355,6 +407,7 @@ function SettingsPanel({
   userName, userCar, nameInput, setNameInput, carInput, setCarInput, onSaveProfile,
   driverDay, setDriverDay, driverTime, setDriverTime, onRegisterDriver,
   schedules, onShowHelp, weekOffset, weekDates,
+  restrictionMode, setRestrictionMode,
 }) {
   const weekBadgeText = weekOffset === 0 ? "이번 주" : weekOffset === 1 ? "다음 주" : weekOffset > 1 ? `${weekOffset}주 후` : "지난 주";
 
@@ -369,6 +422,34 @@ function SettingsPanel({
         <div className="flex-1 flex items-center justify-center gap-1.5 rounded-xl border text-xs font-semibold py-2.5 bg-emerald-50 border-emerald-200 text-emerald-600">
           <span className="w-1.5 h-1.5 rounded-full animate-pulse bg-emerald-500" />
           Google Sheets 연동
+        </div>
+      </div>
+
+      {/* 차량 규제 방식 선택 */}
+      <div className="rounded-2xl overflow-hidden shadow-sm border border-slate-200">
+        <div className="bg-slate-50 px-4 py-2.5 border-b border-slate-200">
+          <p className="text-slate-500 text-xs font-bold">🚘 차량 규제 방식</p>
+        </div>
+        <div className="bg-white p-3">
+          <div className="flex gap-1.5 bg-slate-100 rounded-xl p-1">
+            {["5부제", "홀짝제"].map((mode) => (
+              <button
+                key={mode}
+                onClick={() => setRestrictionMode(mode)}
+                className={`flex-1 py-2.5 rounded-lg text-xs font-black transition-all duration-200
+                  ${restrictionMode === mode
+                    ? "bg-white text-violet-600 shadow-sm"
+                    : "text-slate-400 hover:text-slate-600"}`}
+              >
+                {mode}
+              </button>
+            ))}
+          </div>
+          <p className="text-slate-400 text-xs mt-2 text-center">
+            {restrictionMode === "5부제"
+              ? "요일별 끝번호 2자리 진입 금지"
+              : "홀수차→홀수 날, 짝수차→짝수 날만 운행"}
+          </p>
         </div>
       </div>
 
@@ -409,17 +490,33 @@ function SettingsPanel({
           </div>
           {carInput !== "" && (
             <div className="bg-slate-50 rounded-xl p-3 border border-slate-100">
-              <p className="text-xs text-slate-400 font-bold mb-2">내 차량 진입 금지 요일</p>
-              <div className="flex gap-1.5">
-                {[1, 2, 3, 4, 5].map((d) => (
-                  <div key={d} className={`flex-1 text-center py-2 rounded-xl text-xs font-bold transition-all
-                    ${isBannedOnDay(carInput, d)
-                      ? "bg-red-100 text-red-500 border border-red-200"
-                      : "bg-white text-slate-300 border border-slate-100"}`}>
-                    {DAY_NAMES[d]}
+              {restrictionMode === "홀짝제" ? (
+                <>
+                  <p className="text-xs text-slate-400 font-bold mb-2">내 차량 운행 가능 날</p>
+                  <div className={`text-center py-2.5 rounded-xl text-sm font-black border
+                    ${parseInt(carInput) % 2 !== 0
+                      ? "bg-violet-100 text-violet-600 border-violet-200"
+                      : "bg-sky-100 text-sky-600 border-sky-200"}`}>
+                    {parseInt(carInput) % 2 !== 0
+                      ? "홀수 날 (1·3·5…일) 운행 가능"
+                      : "짝수 날 (2·4·6…일) 운행 가능"}
                   </div>
-                ))}
-              </div>
+                </>
+              ) : (
+                <>
+                  <p className="text-xs text-slate-400 font-bold mb-2">내 차량 진입 금지 요일</p>
+                  <div className="flex gap-1.5">
+                    {[1, 2, 3, 4, 5].map((d) => (
+                      <div key={d} className={`flex-1 text-center py-2 rounded-xl text-xs font-bold transition-all
+                        ${isBannedOnDay(carInput, d)
+                          ? "bg-red-100 text-red-500 border border-red-200"
+                          : "bg-white text-slate-300 border border-slate-100"}`}>
+                        {DAY_NAMES[d]}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
             </div>
           )}
           <button onClick={onSaveProfile}
@@ -458,7 +555,7 @@ function SettingsPanel({
             <label className="block text-xs font-bold text-slate-500 mb-1.5">운행 요일</label>
             <div className="flex gap-1.5">
               {[1, 2, 3, 4, 5].map((d) => {
-                const banned = isBannedOnDay(userCar, d);
+                const banned = isRestricted(userCar, d, weekDates[d].dateStr, restrictionMode);
                 const alreadyReg = schedules.some((s) => s.name === userName && s.day === d);
                 const c = DAY_COLORS[d];
                 return (
@@ -496,14 +593,14 @@ function SettingsPanel({
         </div>
       </div>
 
-      {/* 내 등록 현황 */}
-      {schedules.filter((s) => s.name === userName).length > 0 && (
+      {/* 내 등록 현황 — 현재 보고 있는 주만 표시 */}
+      {schedules.filter((s) => s.name === userName && (s.weekKey || weekDates[1].dateStr) === weekDates[1].dateStr).length > 0 && (
         <div className="rounded-2xl overflow-hidden shadow-md border border-violet-100">
           <div className="bg-violet-50 p-3 border-b border-violet-100">
             <h2 className="text-violet-700 font-black text-sm">📌 내 등록 현황</h2>
           </div>
           <div className="bg-white p-3 space-y-2">
-            {schedules.filter((s) => s.name === userName).sort((a, b) => a.day - b.day).map((s) => (
+            {schedules.filter((s) => s.name === userName && (s.weekKey || weekDates[1].dateStr) === weekDates[1].dateStr).sort((a, b) => a.day - b.day).map((s) => (
               <div key={s.id} className="flex items-center gap-3 bg-violet-50 border border-violet-100 rounded-xl px-3 py-2.5">
                 <span className="text-violet-600 font-black text-sm w-8">{DAY_NAMES[s.day]}</span>
                 <span className="text-slate-700 font-bold text-sm">{s.time}</span>
@@ -534,6 +631,7 @@ export default function App() {
   const [carInput, setCarInput]   = useState(() => { const v = loadLS("tasio_car", ""); return v ?? ""; });
 
   const [schedules, setSchedules] = useState(() => loadLS("tasio_schedules", []));
+  const [restrictionMode, setRestrictionMode] = useState(() => loadLS("tasio_restriction_mode", "홀짝제"));
   const [driverDay, setDriverDay]   = useState(todayDay || 1);
   const [driverTime, setDriverTime] = useState("08:00");
   const [toast, setToast] = useState(null);
@@ -548,6 +646,7 @@ export default function App() {
   const showToast = (msg, type = "success") => setToast({ msg, type });
 
   useEffect(() => { saveLS("tasio_schedules", schedules); }, [schedules]);
+  useEffect(() => { saveLS("tasio_restriction_mode", restrictionMode); }, [restrictionMode]);
 
   // 날씨 fetch — 주가 바뀔 때마다
   useEffect(() => {
@@ -587,17 +686,18 @@ export default function App() {
   }, [fetchFromServer]);
 
   // ── 낙관적 업데이트 ────────────────────────────────────────────────
-  // 순서: UI 즉시 반영 → 서버 저장 → 서버 재조회(즉시 동기화)
-  // 실패 시: UI 롤백 + 에러 토스트
-  const optimisticUpdate = useCallback(async (updateFn, serverAction, serverPayload, rollbackFn) => {
+  // 순서: UI 즉시 반영 → 서버 저장(no-cors) → 1.5초 대기 → 서버 재조회
+  // no-cors 모드는 응답을 읽을 수 없으므로 rollback 대신 재조회로 결과를 확인합니다.
+  const optimisticUpdate = useCallback(async (updateFn, serverAction, serverPayload) => {
     updateFn(); // 즉각 UI 반영
     try {
-      await saveData(serverAction, serverPayload); // 서버 저장
-      await fetchFromServer(true);                 // 저장 직후 서버 재조회
+      await saveData(serverAction, serverPayload);             // 서버 저장 (GET, 응답 확인 가능)
+      await new Promise((r) => setTimeout(r, 2500));           // GAS 시트 반영 대기
+      await fetchFromServer(true);                             // 서버 재조회로 최종 동기화
     } catch (err) {
-      rollbackFn();
       console.warn("[타시오] save 오류:", err.message);
-      showToast("서버 저장 실패. 변경이 취소됐습니다.", "error");
+      showToast("저장 실패: " + err.message, "error");
+      await fetchFromServer(true);                  // 오류 시에도 재조회
     }
   }, [fetchFromServer]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -612,8 +712,11 @@ export default function App() {
 
   const registerDriver = () => {
     if (!userName) { showToast("먼저 내 정보를 저장해주세요.", "error"); return; }
-    if (isBannedOnDay(userCar, driverDay)) {
-      alert(`🚫 차량 진입이 금지된 날입니다!\n\n끝번호 ${BANNED_DIGITS[driverDay].join(", ")}번 차량은 ${DAY_NAMES[driverDay]}요일에 진입할 수 없어요.`);
+    if (isRestricted(userCar, driverDay, weekDates[driverDay].dateStr, restrictionMode)) {
+      const msg = restrictionMode === "홀짝제"
+        ? `🚫 차량 진입이 금지된 날입니다!\n\n${parseInt(weekDates[driverDay].dateStr.split("-")[2], 10)}일은 ${parseInt(userCar) % 2 !== 0 ? "홀수" : "짝수"}차 운행 불가 날이에요.`
+        : `🚫 차량 진입이 금지된 날입니다!\n\n끝번호 ${BANNED_DIGITS[driverDay].join(", ")}번 차량은 ${DAY_NAMES[driverDay]}요일에 진입할 수 없어요.`;
+      alert(msg);
       return;
     }
     const wKey = weekDates[1].dateStr; // 이번(또는 선택된) 주의 weekKey
@@ -628,8 +731,7 @@ export default function App() {
     optimisticUpdate(
       () => { setSchedules((p) => [...p, newEntry]); showToast(`🚙 ${DAY_NAMES[driverDay]}요일 ${driverTime} 등록 완료!`); setActiveTab("board"); },
       "register",
-      { id: newEntry.id, name: newEntry.name, carLastDigit: newEntry.carLastDigit, day: newEntry.day, time: newEntry.time, weekKey: wKey },
-      () => setSchedules((p) => p.filter((s) => s.id !== newEntry.id))
+      { id: newEntry.id, name: newEntry.name, carLastDigit: newEntry.carLastDigit, day: newEntry.day, time: newEntry.time, weekKey: wKey }
     );
   };
 
@@ -644,7 +746,6 @@ export default function App() {
         showToast(`${DAY_NAMES[target.day]}요일엔 이미 예약했어요. 하루 1회만 가능해요.`, "error"); return;
       }
     }
-    const prevSchedules = schedules;
     optimisticUpdate(
       () => {
         setSchedules((p) => p.map((s) =>
@@ -655,32 +756,38 @@ export default function App() {
         showToast(alreadyBooked ? "예약을 취소했습니다." : `🎉 ${target.name} 님 카풀 예약 완료!`, alreadyBooked ? "info" : "success");
       },
       alreadyBooked ? "cancel" : "book",
-      { id: scheduleId, userName },
-      () => setSchedules(prevSchedules)
+      { id: scheduleId, userName }
     );
   };
 
   const deleteDriver = (scheduleId) => {
-    const prev = schedules;
     optimisticUpdate(
       () => { setSchedules((p) => p.filter((s) => s.id !== scheduleId)); showToast("카풀 등록이 삭제됐습니다.", "info"); },
-      "delete", { id: scheduleId },
-      () => setSchedules(prev)
+      "delete",
+      { id: scheduleId }
     );
   };
 
   // 오늘 금지 정보
-  const todayBanned = todayDay ? BANNED_DIGITS[todayDay] : null;
-  const myCarBannedToday = todayDay ? isBannedOnDay(userCar, todayDay) : false;
+  const todayDateStr = toLocalDateStr(new Date());
+  const todayBannedDigits = useMemo(() => {
+    if (!todayDay) return [];
+    if (restrictionMode === "홀짝제") {
+      const dayOfMonth = parseInt(todayDateStr.split("-")[2], 10);
+      return dayOfMonth % 2 !== 0 ? [0, 2, 4, 6, 8] : [1, 3, 5, 7, 9];
+    }
+    return BANNED_DIGITS[todayDay] || [];
+  }, [todayDay, restrictionMode, todayDateStr]);
+  const myCarBannedToday = todayDay ? isRestricted(userCar, todayDay, todayDateStr, restrictionMode) : false;
   const todayBannedPeople = useMemo(() => {
     if (!todayDay) return [];
     const map = new Map();
     if (userName && userCar !== "") map.set(userName, userCar);
     schedules.forEach((s) => { if (!map.has(s.name)) map.set(s.name, s.carLastDigit); });
     const result = [];
-    map.forEach((car, name) => { if (isBannedOnDay(car, todayDay)) result.push(name); });
+    map.forEach((car, name) => { if (isRestricted(car, todayDay, todayDateStr, restrictionMode)) result.push(name); });
     return result;
-  }, [todayDay, userName, userCar, schedules]);
+  }, [todayDay, userName, userCar, schedules, restrictionMode, todayDateStr]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-violet-100 via-fuchsia-50 to-sky-100">
@@ -712,7 +819,7 @@ export default function App() {
           </div>
 
           {/* 오늘 5부제 배너 */}
-          {todayBanned && (
+          {todayDay && (
             <div className={`rounded-2xl px-4 py-3 mb-3 flex items-center gap-3 border shadow-sm
               ${myCarBannedToday
                 ? "bg-red-50 border-red-200"
@@ -722,7 +829,7 @@ export default function App() {
                   {DAY_NAMES[todayDay]}요일 진입 금지 끝번호
                 </span>
                 <div className="flex gap-1.5">
-                  {todayBanned.map((n) => (
+                  {todayBannedDigits.map((n) => (
                     <span key={n} className={`text-sm font-black w-8 h-8 flex items-center justify-center rounded-xl shadow-sm
                       ${myCarBannedToday && userCar === String(n)
                         ? "bg-red-500 text-white shadow-red-200"
@@ -750,28 +857,11 @@ export default function App() {
             </div>
           )}
 
-          {/* 탭 버튼 — 모바일만 */}
-          <div className="flex gap-2 md:hidden">
-            <button onClick={() => setActiveTab("board")}
-              className={`flex-1 py-2.5 rounded-xl text-sm font-bold transition-all duration-200 shadow-sm
-                ${activeTab === "board"
-                  ? "bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white shadow-violet-200"
-                  : "bg-white text-slate-500 border border-violet-100 hover:bg-violet-50"}`}>
-              🙋 태워줘
-            </button>
-            <button onClick={() => setActiveTab("settings")}
-              className={`flex-1 py-2.5 rounded-xl text-sm font-bold transition-all duration-200 shadow-sm
-                ${activeTab === "settings"
-                  ? "bg-gradient-to-r from-sky-400 to-cyan-500 text-white shadow-sky-200"
-                  : "bg-white text-slate-500 border border-violet-100 hover:bg-sky-50"}`}>
-              ⚙️ 내 설정
-            </button>
-          </div>
         </div>
       </div>
 
       {/* ── 메인 콘텐츠 ── */}
-      <div className="max-w-5xl mx-auto px-4 py-4 pb-24">
+      <div className="max-w-5xl mx-auto px-4 py-4 pb-32">
         <div className="flex flex-col md:flex-row md:items-start gap-4">
 
           {/* 좌측: 태워줘 현황판 */}
@@ -788,6 +878,7 @@ export default function App() {
               setWeekOffset={setWeekOffset}
               weekDates={weekDates}
               weatherData={weatherData}
+              restrictionMode={restrictionMode}
             />
           </div>
 
@@ -805,9 +896,35 @@ export default function App() {
               onShowHelp={() => setShowHelp(true)}
               weekOffset={weekOffset}
               weekDates={weekDates}
+              restrictionMode={restrictionMode}
+              setRestrictionMode={setRestrictionMode}
             />
           </div>
 
+        </div>
+      </div>
+
+      {/* ── 하단 네비게이션 바 — 모바일만 ── */}
+      <div className="fixed bottom-0 left-0 right-0 z-40 md:hidden">
+        <div className="bg-white/95 backdrop-blur-md border-t border-violet-100 shadow-xl px-4 py-2 pb-safe">
+          <div className="flex gap-2 max-w-sm mx-auto">
+            <button onClick={() => setActiveTab("board")}
+              className={`flex-1 flex flex-col items-center gap-0.5 py-2.5 rounded-2xl transition-all duration-200
+                ${activeTab === "board"
+                  ? "bg-gradient-to-b from-violet-500 to-fuchsia-500 text-white shadow-lg shadow-violet-200"
+                  : "text-slate-400 hover:text-violet-500"}`}>
+              <span className="text-xl leading-none">🙋</span>
+              <span className="text-xs font-bold">태워줘</span>
+            </button>
+            <button onClick={() => { setActiveTab("settings"); }}
+              className={`flex-1 flex flex-col items-center gap-0.5 py-2.5 rounded-2xl transition-all duration-200
+                ${activeTab === "settings"
+                  ? "bg-gradient-to-b from-sky-400 to-cyan-500 text-white shadow-lg shadow-sky-200"
+                  : "text-slate-400 hover:text-sky-500"}`}>
+              <span className="text-xl leading-none">⚙️</span>
+              <span className="text-xs font-bold">내 설정</span>
+            </button>
+          </div>
         </div>
       </div>
 
